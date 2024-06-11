@@ -1,0 +1,175 @@
+##[[
+	config.lua_bindings = config.lua_bindings or {}
+	if not config.lua_bindings.target_version then
+		static_error("set config.lua_bindings.target_version with either 51, 52, 53, 54")
+	end
+
+	local lfs = require("lfs")
+	local fs = require("nelua.utils.fs")
+	local executor = require("nelua.utils.executor")
+	local nldecl = require("nelua.plugins.nldecl")
+
+	local include_dir = config.lua_bindings.include_dir or "."
+	local cache_dir = fs.getusercachepath("nelua-lua-bindings")
+	lfs.mkdir(cache_dir)
+
+	local output = fs.join(cache_dir, "lua" .. config.lua_bindings.target_version .. ".nelua")
+	config.path = config.path .. ";" .. cache_dir .. "/?.nelua"
+
+	if not fs.isfile(output) then
+		nldecl.generate_bindings_file({
+		  output_file = output,
+
+		  parse_includes = { "<lua.h>", "<lauxlib.h>", "<lualib.h>" },
+			include_dirs = { include_dir },
+	    include_names = { "^lua", "^LUA" },
+
+			output_head = ([=[
+				## cinclude "<lua.h>"
+				## cinclude "<lauxlib.h>"
+				## cinclude "<lualib.h>"
+				## cflags "-I%s"
+			]=]):format(include_dir)
+		})
+	end
+
+	-- for later use
+	local types = require("nelua.types")
+]]
+
+require("lua"..#[tostring(config.lua_bindings.target_version)]#)
+require("allocators.default")
+
+local allocator = default_allocator
+
+--! Namespace for Lua bindings
+global lua = @record{}
+
+--#[[ Types
+
+global lua.State = @record{
+	state: *lua_State,
+}
+
+global lua.Table = @record{
+	state: *lua.State,
+	index: integer,
+}
+
+--]]#
+
+
+--#[[ lua.State
+
+function lua.State.new(): *lua.State
+	local state = allocator:new(@lua.State)
+	state.state = luaL_newstate()
+	return state
+end
+
+--! Closes Lua state when not used
+function lua.State:close(): void
+	lua_close(self.state)
+end
+
+--[[ If enabled, Nelua will closes Lua state at GC time .
+-- * Recommended if the system doesn't free Lua state on exit.
+--]]
+## if config.lua_bindings.enable_gc then
+--! GC handler
+function lua.State:__gc(): void
+	self:close()
+	allocator:delete(self)
+end
+## end
+
+function lua.State:get_L(): *lua_State
+	return self.state
+end
+
+function lua.State:gettop(): integer
+	return lua_gettop(self.state)
+end
+
+function lua.State:push(v: auto): integer
+	## if v.type.is_niltype then
+	lua_pushnil(self.state)
+	## elseif v.type.is_integral then
+	lua_pushinteger(self.state, v)
+	## elseif v.type.is_scalar then
+	lua_pushnumber(self.state, v)
+	## elseif v.type.is_stringy then
+	lua_pushstring(self.state, v)
+	## elseif v.type.is_boolean then
+	lua_pushboolean(self.state, v and 1 or 0)
+	## elseif v.type.is_pointer then
+	lua_pushlightuserdata(self.state, v)
+	## else
+	## static_error("invalid type to push: " .. tostring(v.type))
+	## end
+	return self:gettop()
+end
+
+function lua.State:to(T: type, index: integer): auto
+	## if T.value.is_stringy then
+	return lua_tostring(self.state, index)
+	## elseif T.value.is_integral then
+	return lua_tointeger(self.state, index)
+	## elseif T.value.is_scalar then
+	return lua_tonumber(self.state, index)
+	## elseif T.value.is_boolean then
+	return lua_toboolean(self.state, index)
+	## else
+	## static_error("invalid type to convert to: " .. tostring(T.value))
+	## end
+end
+
+function lua.State:create_table(narr: facultative(integer), nrec: facultative(integer)): *lua.Table
+	return lua.Table.new(self, narr, nrec)
+end
+
+--]]#
+
+--#[[ lua.Table
+
+--! Create a new table.
+function lua.Table.new(state: *lua.State, narr: facultative(integer), nrec: facultative(integer)): *lua.Table
+	## if narr.type.is_niltype then
+	local narr = 0
+	## end
+	## if nrec.type.is_niltype then
+	local nrec = 0
+	## end
+	
+	local table = allocator:new(@lua.Table)
+	lua_createtable(state.state, narr, nrec)
+
+	table.state = state
+	table.index = state:gettop()
+
+	return table
+end
+
+function lua.Table.from_index(state: *lua.State, index: integer)
+	local table = allocator:new(@lua.Table)
+	table.state = state
+	table.index = indx
+	return
+end
+
+function lua.Table:set(k: string, v: auto): integer
+	self.state:push(v)
+	lua_setfield(self.state.state, self.index, k)
+	return self.state:gettop()
+end
+
+function lua.Table:get(T: type, k: string): auto
+	lua_getfield(self.state.state, self.index, k)
+	return self.state:to(#[T.value]#, self.state:gettop())
+end
+
+--]]#
+
+function lua.new_state(): *lua.State
+	return lua.State.new()
+end
