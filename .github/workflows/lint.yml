@@ -9,8 +9,10 @@ jobs:
     steps:
       - name: "Pull repository"
         uses: actions/checkout@v4
-
+      
       - name: "Build Nelua"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           gh repo clone edubart/nelua-lang
           git -C nelua-lang checkout c344db
