@@ -20,7 +20,7 @@ jobs:
           cd nelua-lang
           make -j
           mkdir -p ~/.local/{bin,lib}
-          make install -j
+          make install PREFIX="$HOME/.local" -j
 
       - name: "Lint files"
         run: |
