@@ -1,0 +1,19 @@
+require "lua"
+
+local state = lua.new_state()
+
+local mt = state:create_table(0, 1)
+
+mt:set("__index", 1)
+
+local table = state:create_table(0, 1)
+
+table:set(1, "lol")
+print(table:get(@string, 1))
+print(#table)
+
+table:set_metatable(mt)
+
+print(table:get_metatable():get(@integer, "__index"))
+
+state:close()

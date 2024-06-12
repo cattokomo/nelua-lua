@@ -1,7 +1,19 @@
 ##[[
-	config.lua_bindings = config.lua_bindings or {}
+	config.lua_bindings = config.lua_bindings or {
+		target_version = LUA_TARGET_VERSION,
+		include_dir = LUA_INCLUDE_DIR,
+		ignore_cache = LUA_IGNORE_CACHE,
+	}
 	if not config.lua_bindings.target_version then
-		static_error("set config.lua_bindings.target_version with either 51, 52, 53, 54")
+		static_error("set config.lua_bindings.target_version or define LUA_TARGET_VERSION with value either 51, 52, 53, 54, or jit to use LuaJIT")
+	end
+
+	if not (config.lua_bindings.target_version > 50 and config.lua_bindings.target_version < 55 or config.lua_bindings.target_version == "jit") then
+		static_error("invalid target version: " .. config.lua_bindings.target_version)
+	end
+
+	if config.lua_bindings.target_version == "jit" then
+		config.lua_bindings.target_jit = true
 	end
 
 	local lfs = require("lfs")
@@ -16,13 +28,13 @@
 	local output = fs.join(cache_dir, "lua" .. config.lua_bindings.target_version .. ".nelua")
 	config.path = config.path .. ";" .. cache_dir .. "/?.nelua"
 
-	if not fs.isfile(output) then
+	if not config.lua_bindings.ignore_cache and not fs.isfile(output) then
 		nldecl.generate_bindings_file({
-		  output_file = output,
+		  	output_file = output,
 
-		  parse_includes = { "<lua.h>", "<lauxlib.h>", "<lualib.h>" },
+		  	parse_includes = { "<lua.h>", "<lauxlib.h>", "<lualib.h>" },
 			include_dirs = { include_dir },
-	    include_names = { "^lua", "^LUA" },
+			include_names = { "^lua", "^LUA" },
 
 			output_head = ([=[
 				## cinclude "<lua.h>"
@@ -32,9 +44,6 @@
 			]=]):format(include_dir)
 		})
 	end
-
-	-- for later use
-	local types = require("nelua.types")
 ]]
 
 require("lua"..#[tostring(config.lua_bindings.target_version)]#)
@@ -50,11 +59,15 @@ global lua = @record{}
 global lua.State = @record{
 	state: *lua_State,
 }
+local _lua_state = lua.State
+## _lua_state.value.is_lua_state = true
 
 global lua.Table = @record{
 	state: *lua.State,
 	index: integer,
 }
+local _lua_table = lua.Table
+## _lua_table.value.is_lua_table = true
 
 --]]#
 
@@ -75,7 +88,7 @@ end
 --[[ If enabled, Nelua will closes Lua state at GC time .
 -- * Recommended if the system doesn't free Lua state on exit.
 --]]
-## if config.lua_bindings.enable_gc then
+## if not pragmas.nogc and config.lua_bindings.enable_gc then
 --! GC handler
 function lua.State:__gc(): void
 	self:close()
@@ -91,6 +104,10 @@ function lua.State:gettop(): integer
 	return lua_gettop(self.state)
 end
 
+function lua.State:settop(index: integer): void
+	lua_settop(self.state, index)
+end
+
 function lua.State:push(v: auto): integer
 	## if v.type.is_niltype then
 	lua_pushnil(self.state)
@@ -99,20 +116,27 @@ function lua.State:push(v: auto): integer
 	## elseif v.type.is_scalar then
 	lua_pushnumber(self.state, v)
 	## elseif v.type.is_stringy then
-	lua_pushstring(self.state, v)
+	lua_pushlstring(self.state, v, #v+1)
 	## elseif v.type.is_boolean then
 	lua_pushboolean(self.state, v and 1 or 0)
 	## elseif v.type.is_pointer then
 	lua_pushlightuserdata(self.state, v)
+	## elseif v.type.is_lua_table then
+	lua_pushvalue(self.state, v.index)
 	## else
 	## static_error("invalid type to push: " .. tostring(v.type))
 	## end
 	return self:gettop()
 end
 
+function lua.State:push_value(index: integer): integer
+	lua_pushvalue(self.state, index)
+	return self:gettop()
+end
+
 function lua.State:to(T: type, index: integer): auto
 	## if T.value.is_stringy then
-	return lua_tostring(self.state, index)
+	return lua_tolstring(self.state, index, nilptr)
 	## elseif T.value.is_integral then
 	return lua_tointeger(self.state, index)
 	## elseif T.value.is_scalar then
@@ -153,19 +177,62 @@ end
 function lua.Table.from_index(state: *lua.State, index: integer)
 	local table = allocator:new(@lua.Table)
 	table.state = state
-	table.index = indx
-	return
+	table.index = index
+	return table
 end
 
-function lua.Table:set(k: string, v: auto): integer
+function lua.Table:set(k: auto, v: auto): void
+	self.state:push(k)
 	self.state:push(v)
-	lua_setfield(self.state.state, self.index, k)
-	return self.state:gettop()
+	lua_settable(self.state.state, self.index)
 end
 
-function lua.Table:get(T: type, k: string): auto
-	lua_getfield(self.state.state, self.index, k)
-	return self.state:to(#[T.value]#, self.state:gettop())
+function lua.Table:get(T: type, k: auto): auto
+	self.state:push(k)
+	lua_gettable(self.state.state, self.index)
+	return self.state:to(#[T.value]#, -1)
+end
+
+function lua.Table:rawset(k: auto, v: auto): auto
+	self.state:push(k)
+	self.state:push(v)
+	lua_rawset(self.state.state, self.index)
+end
+
+function lua.Table:rawget(T: type, k: auto): auto
+	self.state:push(k)
+	lua_rawget(self.state.state, self.index)
+	return self.state:to(#[T.value]#, -1)
+end
+
+function lua.Table:len(): isize
+	## if config.lua_bindings.target_version == 51 then
+	return lua_objlen(self.state.state, self.index)
+	## else
+	return lua_len(self.state.state, self.index)
+	## end
+end
+
+function lua.Table:rawlen(): isize
+	## if config.lua_bindings.target_version == 51 then
+	return self:len()
+	## else
+	return lua_rawlen(self.state.state, self.index)
+	## end
+end
+
+function lua.Table:__len(): isize
+	return self:len()
+end
+
+function lua.Table:set_metatable(table: *lua.Table): void
+	self.state:push_value(table.index)
+	lua_setmetatable(self.state.state, self.index)
+end
+
+function lua.Table:get_metatable(): *lua.Table
+	lua_getmetatable(self.state.state, self.index)
+	return lua.Table.from_index(self.state, self.state:gettop())
 end
 
 --]]#

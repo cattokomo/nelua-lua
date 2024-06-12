@@ -1,0 +1,31 @@
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Pull repository"
+        uses: actions/checkout@v4
+
+      - name: "Build Nelua"
+        run: |
+          gh repo clone edubart/nelua-lang
+          git -C nelua-lang checkout c344db
+
+          cd nelua-lang
+          make -j
+          mkdir -p ~/.local/{bin,lib}
+          make install -j
+
+      - name: "Lint files"
+        run: |
+          export PATH="$PATH:$HOME/.local/bin"
+
+          while read -r file; do
+            echo "== Linting $file =="
+            nelua --lint "$file"
+          done < <(find -type f -name '*.nelua')
+          
