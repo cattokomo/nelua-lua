@@ -53,21 +53,21 @@ local allocator = default_allocator
 
 --! Namespace for Lua bindings
 global lua = @record{}
+## Lua = lua.value.metafields
 
 --#[[ Types
 
 global lua.State = @record{
 	state: *lua_State,
 }
-local _lua_state = lua.State
-## _lua_state.value.is_lua_state = true
+## Lua.State.value.is_lua_state = true
 
 global lua.Table = @record{
 	state: *lua.State,
 	index: integer,
 }
 local _lua_table = lua.Table
-## _lua_table.value.is_lua_table = true
+## Lua.Table.value.is_lua_table = true
 
 --]]#
 
@@ -143,6 +143,8 @@ function lua.State:to(T: type, index: integer): auto
 	return lua_tonumber(self.state, index)
 	## elseif T.value.is_boolean then
 	return lua_toboolean(self.state, index)
+	## elseif T.value.is_lua_table then
+	return lua.Table.from_index(self.state, index)
 	## else
 	## static_error("invalid type to convert to: " .. tostring(T.value))
 	## end
@@ -151,6 +153,14 @@ end
 function lua.State:create_table(narr: facultative(integer), nrec: facultative(integer)): *lua.Table
 	return lua.Table.new(self, narr, nrec)
 end
+
+function lua.State:type(index: integer): type
+	local type = lua_type(self.state, index)
+	return (do
+		switch type do
+		case LUA_TNIL then
+			
+	end)
 
 --]]#
 
@@ -221,7 +231,7 @@ function lua.Table:rawlen(): isize
 	## end
 end
 
-function lua.Table:__len(): isize
+function lua.Table:__len(): isize <inline>
 	return self:len()
 end
 
@@ -234,6 +244,11 @@ function lua.Table:get_metatable(): *lua.Table
 	lua_getmetatable(self.state.state, self.index)
 	return lua.Table.from_index(self.state, self.state:gettop())
 end
+
+function lua.Table:__next(k: auto): (boolean, auto, auto)
+	self.state:push(k)
+	if lua_next(self.state.state, self.index) then
+		return true, 
 
 --]]#
 
