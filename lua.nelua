@@ -160,6 +160,13 @@ function lua.State:push(v: auto): void
 		lua_pushboolean(self.L, v and 1 or 0)
 	## elseif v.type.is_pointer then
 		lua_pushlightuserdata(self.L, v)
+	## elseif v.type.nickname == "tupleT" then
+		self:createtable(#[#v.type.fields]#, 0)
+
+		## for _, vl in ipairs(v.type.fields) do
+			self:push(v.#|vl.name|#)
+			self:rawseti(-2, #[tonumber(vl.name:sub(2)) + 1]#)
+		## end
 	## elseif v.type.metafields then
 		## if v.type.metafields.__pairs then
 			self:createtable(0, 0)
@@ -174,7 +181,7 @@ function lua.State:push(v: auto): void
 
 			for i, v in ipairs(v) do
 				self:push(v)
-				self:rawseti(-2, i + 1)
+				self:rawseti(-2, i == 0 and i + 1 or i)
 			end
 		## end
 	## elseif v.type.is_array then
@@ -182,7 +189,7 @@ function lua.State:push(v: auto): void
 
 		for i, v in ipairs(v) do
 			self:push(v)
-			self:rawseti(-2, i + 1)
+			self:rawseti(-2, i == 0 and i + 1 or i)
 		end
 	## elseif v.type.is_record or v.type.is_union then
 		self:createtable(0, #[#v.type.fields]#)

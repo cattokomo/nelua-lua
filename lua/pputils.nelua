@@ -1,5 +1,0 @@
-##[[
-function ns(name)
-  if lua then
-    return "lua."
-]]

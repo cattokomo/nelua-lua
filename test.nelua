@@ -3,19 +3,18 @@
   linklib "lua"
 ]]
 
-require "hashmap"
+require "tuple"
 require "lua"
 
 local state = lua.new_state()
 
-local test = @enum{
-  A = 40,
-  B,
-}
+local test: tuple(integer, string, integer) = tuple.pack(123, "hhh", 321)
 
 state:push(test)
 print(state:gettop(), lua_typename(state.L, lua_type(state.L, -1)))
-lua_getfield(state.L, -1, "B")
+lua_len(state.L, -1)
+print(state:to(@integer, -1))
+lua_rawgeti(state.L, -2, 1)
 print(state:to(@integer, -1))
 
 state:close()

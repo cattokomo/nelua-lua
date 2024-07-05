@@ -1,8 +1,0 @@
-require "lua.pputils"
-require "lua.c"
-
-local M = @record{}
-
-
-
-global #|ns "state"|# = M
