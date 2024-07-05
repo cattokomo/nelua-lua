@@ -1,20 +1,21 @@
+##[[
+  LUA_TARGET_VERSION = 54
+  linklib "lua"
+]]
+
+require "hashmap"
 require "lua"
 
 local state = lua.new_state()
 
-local mt = state:create_table(0, 1)
+local test = @enum{
+  A = 40,
+  B,
+}
 
-mt:set("__index", 1)
-
-local table = state:create_table(0, 1)
-
-table:set(1, "lol")
-print(table:get(@string, 1))
-print(#table)
-
-table:set_metatable(mt)
-
-
-print(table:get_metatable():get(@integer, "__index"))
+state:push(test)
+print(state:gettop(), lua_typename(state.L, lua_type(state.L, -1)))
+lua_getfield(state.L, -1, "B")
+print(state:to(@integer, -1))
 
 state:close()

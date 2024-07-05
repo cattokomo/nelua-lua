@@ -1,0 +1,12 @@
+builtin: 
+true
+name: 
+"_G"
+codename: 
+"nelua__G"
+const: 
+true
+used: 
+true
+staticstorage: 
+true

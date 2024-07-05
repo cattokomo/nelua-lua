@@ -1,0 +1,182 @@
+require("lua.c")
+require("allocators.default")
+
+local allocator = default_allocator
+
+--! Namespace for Lua bindings
+global lua = @record{}
+
+--#[[ Types
+
+global lua.State = @record{
+	state: *lua_State,
+}
+
+--]]#
+
+
+--#[[ lua.State
+
+function lua.State.new(): *lua.State
+	local state = allocator:new(@lua.State)
+	state.state = luaL_newstate()
+	return state
+end
+
+--! Closes Lua state when not used
+function lua.State:close(): void
+	lua_close(self.state)
+end
+
+--[[ If enabled, Nelua will closes Lua state at GC time .
+-- * Recommended if the system doesn't free Lua state on exit.
+--]]
+## if not pragmas.nogc and config.lua_bindings.enable_gc then
+--! GC handler
+function lua.State:__gc(): void
+	self:close()
+	allocator:delete(self)
+end
+## end
+
+function lua.State:get_L(): *lua_State
+	return self.state
+end
+
+function lua.State:gettop(): integer
+	return lua_gettop(self.state)
+end
+
+function lua.State:settop(index: integer): void
+	lua_settop(self.state, index)
+end
+
+function lua.State:push(v: auto): integer
+	## if v.type.is_niltype then
+	lua_pushnil(self.state)
+	## elseif v.type.is_integral then
+	lua_pushinteger(self.state, v)
+	## elseif v.type.is_scalar then
+	lua_pushnumber(self.state, v)
+	## elseif v.type.is_stringy then
+	lua_pushlstring(self.state, v, #v+1)
+	## elseif v.type.is_boolean then
+	lua_pushboolean(self.state, v and 1 or 0)
+	## elseif v.type.is_pointer then
+	lua_pushlightuserdata(self.state, v)
+	## elseif v.type.is_lua_table then
+	lua_pushvalue(self.state, v.index)
+	## else
+	## static_error("invalid type to push: " .. tostring(v.type))
+	## end
+	return self:gettop()
+end
+
+function lua.State:push_value(index: integer): integer
+	lua_pushvalue(self.state, index)
+	return self:gettop()
+end
+
+function lua.State:to(T: type, index: integer): auto
+	## if T.value.is_stringy then
+	return lua_tolstring(self.state, index, nilptr)
+	## elseif T.value.is_integral then
+	return lua_tointeger(self.state, index)
+	## elseif T.value.is_scalar then
+	return lua_tonumber(self.state, index)
+	## elseif T.value.is_boolean then
+	return lua_toboolean(self.state, index)
+	## else
+	## static_error("invalid type to convert to: " .. tostring(T.value))
+	## end
+end
+
+
+--]]#
+
+--#[[ lua.Table
+
+--! Create a new table.
+function lua.Table.new(state: *lua.State, narr: facultative(integer), nrec: facultative(integer)): *lua.Table
+	## if narr.type.is_niltype then
+	local narr = 0
+	## end
+	## if nrec.type.is_niltype then
+	local nrec = 0
+	## end
+	
+	local table = allocator:new(@lua.Table)
+	lua_createtable(state.state, narr, nrec)
+
+	table.state = state
+	table.index = state:gettop()
+
+	return table
+end
+
+function lua.Table.from_index(state: *lua.State, index: integer)
+	local table = allocator:new(@lua.Table)
+	table.state = state
+	table.index = index
+	return table
+end
+
+function lua.Table:set(k: auto, v: auto): void
+	self.state:push(k)
+	self.state:push(v)
+	lua_settable(self.state.state, self.index)
+end
+
+function lua.Table:get(T: type, k: auto): auto
+	self.state:push(k)
+	lua_gettable(self.state.state, self.index)
+	return self.state:to(#[T.value]#, -1)
+end
+
+function lua.Table:rawset(k: auto, v: auto): auto
+	self.state:push(k)
+	self.state:push(v)
+	lua_rawset(self.state.state, self.index)
+end
+
+function lua.Table:rawget(T: type, k: auto): auto
+	self.state:push(k)
+	lua_rawget(self.state.state, self.index)
+	return self.state:to(#[T.value]#, -1)
+end
+
+function lua.Table:len(): isize
+	## if config.lua_bindings.target_version == 51 then
+	return lua_objlen(self.state.state, self.index)
+	## else
+	return lua_len(self.state.state, self.index)
+	## end
+end
+
+function lua.Table:rawlen(): isize
+	## if config.lua_bindings.target_version == 51 then
+	return self:len()
+	## else
+	return lua_rawlen(self.state.state, self.index)
+	## end
+end
+
+function lua.Table:__len(): isize
+	return self:len()
+end
+
+function lua.Table:set_metatable(table: *lua.Table): void
+	self.state:push_value(table.index)
+	lua_setmetatable(self.state.state, self.index)
+end
+
+function lua.Table:get_metatable(): *lua.Table
+	lua_getmetatable(self.state.state, self.index)
+	return lua.Table.from_index(self.state, self.state:gettop())
+end
+
+--]]#
+
+function lua.new_state(): *lua.State
+	return lua.State.new()
+end
