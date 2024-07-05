@@ -3,18 +3,16 @@
   linklib "lua"
 ]]
 
-require "tuple"
+require "vector"
 require "lua"
 
 local state = lua.new_state()
 
-local test: tuple(integer, string, integer) = tuple.pack(123, "hhh", 321)
+local test: vector(integer) = {1, 2, 3}
 
 state:push(test)
 print(state:gettop(), lua_typename(state.L, lua_type(state.L, -1)))
 lua_len(state.L, -1)
-print(state:to(@integer, -1))
-lua_rawgeti(state.L, -2, 1)
 print(state:to(@integer, -1))
 
 state:close()

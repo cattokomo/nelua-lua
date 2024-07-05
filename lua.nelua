@@ -102,7 +102,7 @@ function lua.State:getL(): *lua_State
 	return self.L
 end
 
-function lua.State:luajit_setmode(index: integer, feature: string <comptime>, mode: overload(boolean, string)): boolean
+function lua.State:luajit_setmode(index: integer, feature: string <comptime>, mode: overload(boolean, string) <comptime>): boolean
 	## if config.lua_bindings.target_jit then
 		local jit_feature: integer
 		local jit_mode: integer
@@ -167,29 +167,36 @@ function lua.State:push(v: auto): void
 			self:push(v.#|vl.name|#)
 			self:rawseti(-2, #[tonumber(vl.name:sub(2)) + 1]#)
 		## end
-	## elseif v.type.metafields then
-		## if v.type.metafields.__pairs then
-			self:createtable(0, 0)
+	## elseif v.type.metafields and v.type.metafields.__ipairs then
+		self:createtable(0, 0)
 
-			for k, v in pairs(v) do
-				self:push(k)
-				self:push(v)
-				self:settable(-3)
+		local is_zero: boolean
+		for i, v in ipairs(v) do
+			if not is_zero then
+				is_zero = i == 0
 			end
-		## elseif v.type.metafields.__ipairs then
-			self:createtable(0, 0)
+			self:push(v)
+			self:rawseti(-2, i + (is_zero and 1 or 0))
+		end
+	## elseif v.type.metafields and v.type.metafields.__pairs then
+		self:createtable(0, 0)
 
-			for i, v in ipairs(v) do
-				self:push(v)
-				self:rawseti(-2, i == 0 and i + 1 or i)
-			end
-		## end
-	## elseif v.type.is_array then
+		for k, v in pairs(v) do
+			self:push(k)
+			self:push(v)
+			self:settable(-3)
+		end
+	## elseif v.type.is_container then
 		self:createtable(#v, 0)
 
-		for i, v in ipairs(v) do
-			self:push(v)
-			self:rawseti(-2, i == 0 and i + 1 or i)
+		for i = #[v.type.is_oneindexing and 1 or 0]#, #v - #[v.type.is_oneindexing and 0 or 1]# do
+			local vl = v[i]
+			## if not v.type.is_oneindexing then
+				i = i + 1
+			## end
+			print(i, vl)
+			self:push(vl)
+			self:rawseti(-2, i)
 		end
 	## elseif v.type.is_record or v.type.is_union then
 		self:createtable(0, #[#v.type.fields]#)
