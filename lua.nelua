@@ -22,6 +22,7 @@
 
 	if config.lua_bindings.target_version == "jit" then
 		config.lua_bindings.target_jit = true
+		config.lua_bindings.target_version = 51
 		luajit_header = "<luajit.h>"
 	end
 
@@ -56,7 +57,16 @@
 	end
 ]]
 
+##[[
+	local function comptime_raise(fmt, ...)
+		static_error("lua error: " .. fmt:format(...))
+	end
+]]
+
 require("lua"..#[tostring(config.lua_bindings.target_version)]#)
+local function lua_pop(L: *lua_State, n: cint): void <cimport, nodecl> end
+
+require("string")
 require("allocators.default")
 
 local allocator = default_allocator
@@ -64,21 +74,117 @@ local allocator = default_allocator
 --! Namespace for Lua bindings
 global lua = @record{}
 
+--! Namespace for helpers
+global lua.helpers = @record{}
+
 --#[[ Types
 
-global lua.State = @record{
-	L: *lua_State,
-}
-## lua.value.metafields.State.is_lua_state = true
+global lua.State <forwarddecl> = @record{}
+## lua.value.metafields.State.value.is_lua_state = true
 
+global lua.StackCheck <forwarddecl> = @record{}
+
+local CFunctionConcept = #[concept(function(x)
+	if x.type:is_equal(lua_CFunction) then
+		return true
+	end
+
+	if not x.type.is_function then
+		return nil, "expected type function, got '" .. x.type.nickname or x.type.name .. "'"
+	end
+
+	if x.type.is_polyfunction then
+		return nil, "cannot accept a polymorphic function"
+	end
+
+	local typ = x.type.argtypes[1]
+	local rettyp = x.type.rettypes[1]
+	if not (typ and typ.is_pointer and
+			(typ.subtype.is_lua_state or tostring(typ.subtype) == "lua_State" and tostring(rettyp) == "cint")) then
+		return nil, "expected `function(*lua.State): T` or `function(*lua_State): cint`"
+	end
+
+	return true
+end)]#
+
+--#]]
+
+--#[[ lua.helpers
+
+function lua.helpers.wrap_cfunction(func: CFunctionConcept <comptime>)
+	## if tostring(func.type.argtypes[1].subtype) == "lua_State" and tostring(func.type.rettypes[1]) == "cint" then
+		return func
+	## else
+		return function(preL: *lua_State): cint
+			## func.node.attr.inline = true
+			local L = lua.State.from(preL)
+			local result = func(L)
+			local scheck = lua.StackCheck{L:gettop()}
+
+			## if func.type.rettypes[1].is_integral then
+				return scheck:check(func, L, result)
+			## else
+			 	L:push(result)
+				return scheck:check(func, L, 1)
+			## end
+		end
+	## end
+end
+
+--#]]
+
+--#[[ lua.StackCheck
+
+lua.StackCheck = @record{
+	top: integer
+}
+
+function lua.StackCheck:check(func: CFunctionConcept <comptime>, L: *lua.State, pushed: integer): integer
+	## if pragmas.nocheck then
+		return 0
+	## else
+		local new_top = L:gettop()
+		if new_top ~= self.top + pushed then
+			## if func.type.is_function then
+				## local node = func.value.node
+				## local name = type(node) == "string" and node or "anonymous function"
+				## local lineno = require("lpegrex").calcline(node.src.content, node.pos)
+				L:raise(
+					"stack check failed in %s at %s:%d (expected %d items but %d were pushed)",
+					#[name]#,
+					#[node.src.name]#,
+					#[lineno]#,
+					pushed,
+					new_top - self.top
+				)
+			## else
+				L:raise("stack check failed (expected %d items but %d were pushed)", pushed, new_top - self.top)
+			## end
+		end
+		return pushed
+	## end
+end
+	
 --]]#
 
 
 --#[[ lua.State
 
+lua.State = @record{
+	L: *lua_State,
+}
 function lua.State.new(): *lua.State
-	local state = allocator:new(@lua.State)
+	local state = new(@lua.State)
 	state.L = luaL_newstate()
+	if state.L == nilptr then
+		state:raise("cannot initialize lua state, out of memory!")
+	end
+	return state
+end
+
+function lua.State.from(L: *lua_State): *lua.State
+	local state = new(@lua.State)
+	state.L = L
 	return state
 end
 
@@ -87,6 +193,14 @@ function lua.State:close(): void
 	lua_close(self.L)
 end
 
+function lua.State:destroy(): void
+	if self.L ~= nilptr then
+		self:close()
+	end
+	delete(self)
+end
+
+
 --[[ If enabled, Nelua will closes Lua state at GC time .
 -- * Recommended if the system doesn't free Lua state on exit.
 --]]
@@ -94,12 +208,23 @@ end
 --! GC handler
 function lua.State:__gc(): void
 	self:close()
-	allocator:delete(self)
 end
 ## end
 
+function lua.State:__close(): void
+	self:close()
+end
+
+function lua.State.__convert(L: *lua_State): *lua.State
+	return lua.State.from(L)
+end
+
 function lua.State:getL(): *lua_State
 	return self.L
+end
+
+function lua.State:raise(fmt: string, ...: varargs): void
+	error("lua error: " .. fmt:format(...))
 end
 
 function lua.State:luajit_setmode(index: integer, feature: string <comptime>, mode: overload(boolean, string) <comptime>): boolean
@@ -155,7 +280,7 @@ function lua.State:push(v: auto): void
 	## elseif v.type.is_scalar then
 		lua_pushnumber(self.L, v)
 	## elseif v.type.is_stringy then
-		lua_pushlstring(self.L, v, #v+1)
+		lua_pushstring(self.L, v)
 	## elseif v.type.is_boolean then
 		lua_pushboolean(self.L, v and 1 or 0)
 	## elseif v.type.is_pointer then
@@ -194,7 +319,6 @@ function lua.State:push(v: auto): void
 			## if not v.type.is_oneindexing then
 				i = i + 1
 			## end
-			print(i, vl)
 			self:push(vl)
 			self:rawseti(-2, i)
 		end
@@ -222,7 +346,7 @@ function lua.State:push(v: auto): void
 			## end
 		## end
 	## else
-	## static_error("unable to push a '" .. tostring(v.type) .. "'")
+	## comptime_raise("unable to push a value '%s'", tostring(v.type))
 	## end
 end
 
@@ -247,6 +371,10 @@ function lua.State:to(T: type, index: integer): auto
 	## end
 end
 
+function lua.State:pop(index: integer): void
+	lua_pop(self.L, index)
+end
+
 function lua.State:createtable(nseq: integer, nrec: integer): void
 	lua_createtable(self.L, nseq, nrec)
 end
@@ -255,21 +383,37 @@ function lua.State:settable(index: integer): void
 	lua_settable(self.L, index)
 end
 
-function lua.State:rawset(index: integer): void
-	lua_rawset(self.L, index)
-end
-
-function lua.State:rawseti(index: integer, n: usize): void
-	lua_rawseti(self.L, index, n)
-end
-
 function lua.State:setfield(index: integer, field: string): void
 	lua_setfield(self.L, index, field)
 end
 
+function lua.State:rawset(index: integer): void
+	lua_rawset(self.L, index)
+end
+
+function lua.State:rawseti(index: integer, n: isize): void
+	lua_rawseti(self.L, index, n)
+end
+
+function lua.State:len(index: integer): void
+	## if config.lua_bindings.target_version < 52 then
+		self:push(lua_objlen(self.L, index))
+	## else
+		lua_len(self.L, index)
+	## end
+end
+
+function lua.State:rawlen(index: integer): void
+	## if config.lua_bindings.target_version < 52 then
+		self:len(index)
+	## else
+		lua_rawlen(self.L, index)
+	## end
+end
+
 --]]#
 
-function lua.new_state(): *lua.State
+function lua.newstate(): *lua.State
 	return lua.State.new()
 end
 

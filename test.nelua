@@ -1,18 +1,9 @@
 ##[[
-  LUA_TARGET_VERSION = 54
-  linklib "lua"
+  LUA_TARGET_VERSION = "jit"
+  LUA_INCLUDE_DIR = "/usr/include/luajit-2.1"
+  linklib "luajit"
 ]]
 
-require "vector"
-require "lua"
+require("lua")
 
-local state = lua.new_state()
-
-local test: vector(integer) = {1, 2, 3}
-
-state:push(test)
-print(state:gettop(), lua_typename(state.L, lua_type(state.L, -1)))
-lua_len(state.L, -1)
-print(state:to(@integer, -1))
-
-state:close()
+local L: *lua.State = lua.State.new()
