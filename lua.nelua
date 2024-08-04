@@ -47,12 +47,11 @@
 			include_names = { "^lua", "^LUA" },
 
 			output_head = ([=[
-				## cflags "-I%s"
-				## cinclude "<lua.h>"
-				## cinclude "<lauxlib.h>"
-				## cinclude "<lualib.h>"
-				%s
-			]=]):format(include_dir, luajit_header and '## cinclude "<luajit.h>"' or "")
+## cincdir "%s"
+## cinclude "<lua.h>"
+## cinclude "<lauxlib.h>"
+## cinclude "<lualib.h>"
+%s]=]):format(include_dir, luajit_header and '## cinclude "<luajit.h>"' or "")
 		})
 	end
 ]]
@@ -83,6 +82,19 @@ global lua.State <forwarddecl> = @record{}
 ## lua.value.metafields.State.value.is_lua_state = true
 
 global lua.StackCheck <forwarddecl> = @record{}
+
+global lua.Type = @enum{
+	None = LUA_TNONE,
+	Nil = LUA_TNIL,
+	Number = LUA_TNUMBER,
+	Boolean = LUA_TBOOLEAN,
+	String = LUA_TSTRING,
+	Table = LUA_TTABLE,
+	Function = LUA_TFUNCTION,
+	Userdata = LUA_TUSERDATA,
+	Thread = LUA_TTHREAD,
+	LightUserdata = LUA_TLIGHTUSERDATA,
+}
 
 local CFunctionConcept = #[concept(function(x)
 	if x.type:is_equal(lua_CFunction) then
@@ -131,6 +143,17 @@ function lua.helpers.wrap_cfunction(func: CFunctionConcept <comptime>)
 	## end
 end
 
+--[=[
+function lua.helpers.wrap_function(func: auto <comptime>)
+	## if func.type.is_function then
+		local T = #[func.type.rettypes[1]]#
+
+		## if #func.type.argtypes == 1 and func.type.argtypes[1].is_pointer and tostring(func.type.argtypes[1].subtype) == "lua_State" then
+			return lua.helpers.wrap_cfunction(func)
+		## else
+			return function()
+]=]
+
 --#]]
 
 --#[[ lua.StackCheck
@@ -149,7 +172,7 @@ function lua.StackCheck:check(func: CFunctionConcept <comptime>, L: *lua.State, 
 				## local node = func.value.node
 				## local name = type(node) == "string" and node or "anonymous function"
 				## local lineno = require("lpegrex").calcline(node.src.content, node.pos)
-				L:raise(
+				L:error(
 					"stack check failed in %s at %s:%d (expected %d items but %d were pushed)",
 					#[name]#,
 					#[node.src.name]#,
@@ -158,7 +181,7 @@ function lua.StackCheck:check(func: CFunctionConcept <comptime>, L: *lua.State, 
 					new_top - self.top
 				)
 			## else
-				L:raise("stack check failed (expected %d items but %d were pushed)", pushed, new_top - self.top)
+				L:error("stack check failed (expected %d items but %d were pushed)", pushed, new_top - self.top)
 			## end
 		end
 		return pushed
@@ -170,31 +193,25 @@ end
 
 --#[[ lua.State
 
-lua.State = @record{
-	L: *lua_State,
-}
-function lua.State.new(): *lua.State
-	local state = new(@lua.State)
-	state.L = luaL_newstate()
-	if state.L == nilptr then
-		state:raise("cannot initialize lua state, out of memory!")
-	end
-	return state
-end
+lua.State = @lua_State
 
-function lua.State.from(L: *lua_State): *lua.State
-	local state = new(@lua.State)
-	state.L = L
-	return state
+--# core functions
+
+function lua.State.new(): *lua.State
+	local L = luaL_newstate()
+	if L == nilptr then
+		error("cannot initialize lua state, out of memory!")
+	end
+	return L
 end
 
 --! Closes Lua state when not used
 function lua.State:close(): void
-	lua_close(self.L)
+	lua_close(self)
 end
 
 function lua.State:destroy(): void
-	if self.L ~= nilptr then
+	if self ~= nilptr then
 		self:close()
 	end
 	delete(self)
@@ -216,16 +233,10 @@ function lua.State:__close(): void
 end
 
 function lua.State.__convert(L: *lua_State): *lua.State
-	return lua.State.from(L)
+	return L
 end
 
-function lua.State:getL(): *lua_State
-	return self.L
-end
-
-function lua.State:raise(fmt: string, ...: varargs): void
-	error("lua error: " .. fmt:format(...))
-end
+--# LuaJIT functions
 
 function lua.State:luajit_setmode(index: integer, feature: string <comptime>, mode: overload(boolean, string) <comptime>): boolean
 	## if config.lua_bindings.target_jit then
@@ -264,12 +275,64 @@ function lua.State:luajit_setmode(index: integer, feature: string <comptime>, mo
 	## end -- config.lua_bindings.target_jit
 end
 
+--# stack functions
+
 function lua.State:gettop(): integer
 	return lua_gettop(self.L)
 end
 
 function lua.State:settop(index: integer): void
 	lua_settop(self.L, index)
+end
+
+## local function generate_isx(typ)
+	function lua.State:#|"is" .. typ|#(index: integer): boolean
+		local function #|"lua_is" .. typ|#(L: *lua_State, idx: cint): cint <cimport, nodecl> end
+		return #|"lua_is" .. typ|#(self.L, index) == 1
+	end
+## end
+
+generate_isx!("boolean")
+generate_isx!("cfunction")
+generate_isx!("function")
+generate_isx!("integer")
+generate_isx!("lightuserdata")
+generate_isx!("nil")
+generate_isx!("none")
+generate_isx!("noneornil")
+generate_isx!("number")
+generate_isx!("string")
+generate_isx!("table")
+generate_isx!("thread")
+generate_isx!("userdata")
+
+function lua.State:type(index: integer): lua.Type
+	return lua_type(self.L, index)
+end
+
+function lua.State:typename(index: integer): string
+	local typ: string
+	switch self:type(index) do
+	case lua.Type.None then
+		typ = "none"
+	case lua.Type.Nil then
+		typ = "nil"
+	case lua.Type.Number then
+		typ = "number"
+	case lua.Type.Boolean then
+		typ = "boolean"
+	case lua.Type.String then
+		typ = "string"
+	case lua.Type.Table then
+		typ = "table"
+	case lua.Type.Function then
+		typ = "function"
+	case lua.Type.Userdata, lua.Type.LightUserdata then
+		typ = "userdata"
+	case lua.Type.Thread then
+		typ = "thread"
+	end
+	return typ
 end
 
 function lua.State:push(v: auto): void
@@ -350,30 +413,68 @@ function lua.State:push(v: auto): void
 	## end
 end
 
-function lua.State:pushvalue(index: integer): integer
+function lua.State:pushvalue(index: integer): void
 	lua_pushvalue(self.L, index)
-	return self:gettop()
 end
 
 function lua.State:to(T: type, index: integer): auto
+	local ret: T
 	## if T.value.is_stringy then
-		return lua_tolstring(self.L, index, nilptr)
+		ret = lua_tolstring(self.L, index, nilptr)
 	## elseif T.value.is_integral then
-		return lua_tointegerx(self.L, index, nilptr)
-	## elseif T.value.is_scalar then
-		return lua_tonumber(self.L, index)
+		ret = lua_tointegerx(self.L, index, nilptr)
+	## elseif T.value.is_float then
+		ret = lua_tonumber(self.L, index)
 	## elseif T.value.is_boolean then
-		return lua_toboolean(self.L, index)
+		ret = lua_toboolean(self.L, index)
 	## elseif T.value.is_pointer then
-		return lua_topointer(self.L, index)
+		ret = lua_touserdata(self.L, index)
+	## elseif T.value.is_container and not T.value.is_array and T.value.metafields.push then
+		self:pushvalue(index) --> table
+		self:push(nil) --> table, nil
+
+		while self:next(-2) ~= 0 do --> 
+			local v = self:to(@#[T.value.subtype]#, -1)
+			ret:push(v)
+			self:pop(-1)
+		end
 	## else
 	## static_error("invalid type to convert to: " .. tostring(T.value))
 	## end
+	return ret
 end
 
 function lua.State:pop(index: integer): void
 	lua_pop(self.L, index)
 end
+
+--[[
+function lua.State:check(T: type, index: integer): auto
+	## if T.value.is_stringy then
+		if not self:isstring(index) then
+			self:error("expected string, got %s", self:typename(index))
+			return (@T)()
+		end
+	## elseif T.value.is_integral then
+		if not self:isinteger(index) then
+			self:error("expected integer, got %s", self:typename(index))
+			return (@T)()
+		end
+	## elseif T.value.is_float then
+		if not self:isnumber(index) then
+			self:error("expected number, got %s", self:typename(index))
+			return (@T)()
+		end
+	## elseif T.value.is_boolean then
+		if not self:isboolean(index) then
+			self:error("expected boolean, got %s", self:typename(index))
+			return (@T)()
+		end
+	## elseif T.value.is_pointer then
+		if not self:
+]]
+
+--# table functions
 
 function lua.State:createtable(nseq: integer, nrec: integer): void
 	lua_createtable(self.L, nseq, nrec)
@@ -411,12 +512,25 @@ function lua.State:rawlen(index: integer): void
 	## end
 end
 
+--# misc. functions
+
+function lua.State:throw() <noreturn>
+	lua_error(self.L)
+end
+
+function lua.State:error(err: string, ...: varargs) <noreturn>
+	self:push(err:format(...))
+	self:throw()
+end
+
+function lua.State:next(index: integer): integer
+	return lua_next(self.L, index)
+end
+
 --]]#
 
 function lua.newstate(): *lua.State
 	return lua.State.new()
 end
 
-##[[
-	config.path = oldpath
-]]
+## config.path = oldpath

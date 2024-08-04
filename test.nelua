@@ -5,5 +5,14 @@
 ]]
 
 require("lua")
+require("vector")
 
 local L: *lua.State = lua.State.new()
+defer L:close() end
+
+local vec: vector(integer)
+vec:push(1)
+
+L:push(vec)
+local newvec = L:to(@vector(integer), -1)
+print(newvec[0])
