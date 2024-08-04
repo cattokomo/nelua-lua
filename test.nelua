@@ -10,9 +10,6 @@ require("vector")
 local L: *lua.State = lua.State.new()
 defer L:close() end
 
-local vec: vector(integer)
-vec:push(1)
+L:push((@[3]integer)({1, 2, 3}))
 
-L:push(vec)
-local newvec = L:to(@vector(integer), -1)
-print(newvec[0])
+print(L:to(@[3]integer, -1)[1])
